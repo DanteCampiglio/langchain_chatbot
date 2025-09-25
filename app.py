@@ -43,8 +43,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- CONFIG PATHS ---
-DOCUMENTS_PATH = r"C:\Users\s1246678\OneDrive - Syngenta\Documents\Syngenta\IA\Data Science\RAG Pipeline\langchain_chatbot\documents"
+DOCUMENTS_PATH = "documents"
+#DOCUMENTS_PATH = r"C:\Users\s1246678\OneDrive - Syngenta\Documents\Syngenta\IA\Data Science\RAG Pipeline\langchain_chatbot\documents"
 LLAMA_SERVER_URL = "http://127.0.0.1:8000/completion"
+
+#
 
 # --- FUNCIONES LLM ---
 def generate_ai_response(query, relevant_chunks):
