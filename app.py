@@ -405,6 +405,7 @@ with st.sidebar:
     if st.button("🔄 Recargar documentos"):
         st.rerun()
     
+    
     st.markdown(
         """
         <div style='margin-top:2em; padding:1em; background:#f0f8ff; border-radius:8px; border:1px solid #009639;'>
