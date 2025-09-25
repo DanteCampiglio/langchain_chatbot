@@ -4,388 +4,458 @@ import PyPDF2
 import os
 import glob
 import requests
-import json
-import time
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
 
-# --- CONFIG ---
+# --- CONFIG VISUAL ---
+st.set_page_config(page_title="Chatbot - Hojas de Seguridad", layout="wide", page_icon="🧑‍🔬")
+
+st.markdown("""
+    <style>
+        body {
+            background-color: #f3f6fa;
+        }
+        .main {
+            background-color: #f9fafb;
+        }
+        .block-container {
+            padding-top: 2rem;
+        }
+        .stTextInput>div>div>input {
+            border-radius: 10px;
+            border: 1px solid #009639;
+        }
+        .stButton>button {
+            border-radius: 8px;
+            background-color: #009639;
+            color: white;
+        }
+        .stAlert {
+            border-radius: 10px;
+        }
+        .st-bb {
+            background: #e3f9ed;
+            border-radius: 8px;
+        }
+        hr {
+            border:1px solid #009639 !important;
+        }
+        .env-badge {
+            background: #007bff;
+            color: white;
+            padding: 0.3em 0.8em;
+            border-radius: 15px;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+        .local-badge {
+            background: #28a745;
+            color: white;
+            padding: 0.3em 0.8em;
+            border-radius: 15px;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- CONFIG PATHS ---
 DOCUMENTS_PATH = "documents"
 LLAMA_SERVER_URL = "http://127.0.0.1:8000/completion"
 
 # --- DETECTAR ENTORNO ---
 def is_streamlit_cloud():
     """Detecta si está corriendo en Streamlit Cloud"""
-    return (
-        os.getenv("STREAMLIT_SHARING_MODE") is not None or
-        os.getenv("STREAMLIT_SERVER_PORT") is not None or
-        "streamlit" in os.getenv("HOME", "").lower() or
-        not os.path.exists("/usr/local/bin")  # Indicador típico de entorno local
-    )
+    # Verificar variables de entorno específicas de Streamlit Cloud
+    cloud_indicators = [
+        os.getenv("STREAMLIT_SHARING_MODE"),
+        os.getenv("STREAMLIT_SERVER_PORT"),
+        os.getenv("STREAMLIT_SERVER_ADDRESS")
+    ]
+    
+    # Si alguna está presente, probablemente es cloud
+    if any(cloud_indicators):
+        return True
+    
+    # Verificar si estamos en un entorno tipo cloud (sin llama.cpp local)
+    try:
+        response = requests.get("http://127.0.0.1:8000", timeout=1)
+        return False  # Si llama.cpp responde, estamos en local
+    except:
+        # Si no responde llama.cpp, probablemente estamos en cloud
+        return True
 
-# --- FUNCIÓN IA ADAPTATIVA ---
+# --- FUNCIONES LLM MISTRAL ---
 def generate_ai_response(query, relevant_chunks):
     if not relevant_chunks:
         return "No se encontró información relevante en los documentos disponibles."
     
-    # Verificar si estamos en Streamlit Cloud
+    context = "\n".join([chunk['content'][:400] for chunk in relevant_chunks[:2]])
+    
+    # Detectar entorno y usar Mistral correspondiente
     if is_streamlit_cloud():
-        return generate_cloud_response(query, relevant_chunks)
+        return generate_mistral_api_response(query, context)
     else:
-        return generate_local_response(query, relevant_chunks)
+        return generate_local_mistral_response(query, context)
 
-def generate_cloud_response(query, relevant_chunks):
-    """Respuesta para Streamlit Cloud (sin llama.cpp)"""
-    
-    # Respuesta inteligente basada en búsqueda de patrones
-    context = "\n\n".join([
-        f"**{chunk['source']}:**\n{chunk['content'][:400]}" 
-        for chunk in relevant_chunks[:2]
-    ])
-    
-    # Análisis básico de palabras clave
-    query_lower = query.lower()
-    
-    # Patrones comunes en hojas de seguridad
-    safety_patterns = {
-        "contacto": ["ojos", "piel", "contact", "skin", "eyes"],
-        "inhalacion": ["inhalar", "respirar", "inhalation", "breathing"],
-        "ingestion": ["ingerir", "tragar", "ingestion", "swallow"],
-        "primeros auxilios": ["first aid", "emergency", "emergencia"],
-        "almacenamiento": ["storage", "store", "almacenar"],
-        "manipulacion": ["handling", "manipular", "use"],
-        "peligros": ["hazard", "danger", "peligro", "risk"],
-        "equipo": ["ppe", "equipment", "protection", "protección"]
-    }
-    
-    # Encontrar el patrón más relevante
-    relevant_pattern = None
-    for pattern, keywords in safety_patterns.items():
-        if any(keyword in query_lower for keyword in keywords):
-            relevant_pattern = pattern
-            break
-    
-    # Buscar información específica en el contexto
-    response_parts = []
-    
-    if relevant_pattern:
-        # Buscar oraciones relevantes
-        sentences = context.split('.')
-        relevant_sentences = []
+def generate_mistral_api_response(query, context):
+    """Mistral via API para Streamlit Cloud"""
+    try:
+        # Verificar si tenemos la API key de forma segura
+        try:
+            api_key = st.secrets["MISTRAL_API_KEY"]
+        except:
+            return "⚠️ API Key de Mistral no configurada. Ve a Settings → Secrets en Streamlit Cloud."
         
-        for sentence in sentences:
-            sentence_lower = sentence.lower()
-            if any(keyword in sentence_lower for keyword in safety_patterns[relevant_pattern]):
-                relevant_sentences.append(sentence.strip())
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
         
-        if relevant_sentences:
-            response_parts.extend(relevant_sentences[:3])
-    
-    # Si no encontró patrones específicos, usar las oraciones más relevantes
-    if not response_parts:
-        query_words = set(query_lower.split())
-        sentences = context.split('.')
-        scored_sentences = []
-        
-        for sentence in sentences:
-            if len(sentence.strip()) > 20:
-                sentence_words = set(sentence.lower().split())
-                score = len(query_words.intersection(sentence_words))
-                if score > 0:
-                    scored_sentences.append((score, sentence.strip()))
-        
-        # Ordenar por relevancia
-        scored_sentences.sort(reverse=True)
-        response_parts = [sent[1] for sent in scored_sentences[:3]]
-    
-    if response_parts:
-        sources = list(set([chunk['source'] for chunk in relevant_chunks]))
-        response = "**Información encontrada:**\n\n" + "\n\n".join(response_parts)
-        response += f"\n\n*📚 Fuentes: {', '.join(sources)}*"
-        return response
-    else:
-        return "La información específica no se encuentra claramente detallada en los documentos disponibles."
-
-def generate_local_response(query, relevant_chunks):
-    """Respuesta para entorno local (con llama.cpp)"""
-    context = "\n\n".join([
-        f"DOC: {chunk['source'][:20]}\n{chunk['content'][:400]}" 
-        for chunk in relevant_chunks[:2]
-    ])
-    
-    prompt = f"""Responde basándote SOLO en estos documentos:
-
+        payload = {
+            "model": "mistral-small-latest",
+            "messages": [
+                {
+                    "role": "system", 
+                    "content": "Eres un asistente especializado en hojas de seguridad. SOLO responde basándote en la información proporcionada. Si la información no está disponible, di claramente que no se encuentra en los documentos."
+                },
+                {
+                    "role": "user", 
+                    "content": f"""CONTEXTO DE DOCUMENTOS:
 {context}
 
-Pregunta: {query}
-Respuesta:"""
+PREGUNTA: {query}
 
-    payload = {
-        "prompt": prompt,
-        "n_predict": 100,
-        "temperature": 0.1,
-        "top_p": 0.8,
-        "top_k": 20,
-        "repeat_penalty": 1.05,
-        "stop": ["Pregunta:", "\n\n", "DOC:"],
-        "stream": False
-    }
-    
-    timeouts = [30, 60, 90]
-    
-    for attempt, timeout in enumerate(timeouts, 1):
-        try:
-            st.info(f"🤖 Procesando con IA local (intento {attempt}/{len(timeouts)})")
+Responde únicamente basándote en el contexto anterior:"""
+                }
+            ],
+            "max_tokens": 150,
+            "temperature": 0.3
+        }
+        
+        with st.spinner("🤖 Consultando Mistral API..."):
+            response = requests.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+        
+        if response.status_code == 200:
+            data = response.json()
+            text = data['choices'][0]['message']['content'].strip()
             
+            # Validar que no esté vacía
+            if not text:
+                return "No pude generar una respuesta clara basada en los documentos."
+            
+            return text
+            
+        elif response.status_code == 401:
+            return "❌ Error de autenticación con Mistral API. Verifica tu API key."
+        elif response.status_code == 429:
+            return "⏱️ Límite de consultas alcanzado. Intenta de nuevo en unos minutos."
+        else:
+            return f"❌ Error API Mistral: {response.status_code}"
+            
+    except requests.exceptions.Timeout:
+        return "⏱️ Timeout: Mistral API está tardando demasiado."
+    except requests.exceptions.ConnectionError:
+        return "❌ Error de conexión con Mistral API."
+    except Exception as e:
+        return f"❌ Error inesperado: {str(e)}"
+
+def generate_local_mistral_response(query, context):
+    """Mistral local via llama.cpp"""
+    prompt = f"""Eres un asistente especializado en hojas de seguridad. SOLO puedes responder basándote en la información proporcionada a continuación.
+
+REGLAS IMPORTANTES:
+- Si la información no está en el contexto, responde: "Esta información no se encuentra en los documentos disponibles."
+- NO inventes ni agregues información que no esté explícitamente en el contexto
+- Cita específicamente de qué documento proviene la información cuando sea posible
+
+CONTEXTO DE LOS DOCUMENTOS:
+{context}
+
+PREGUNTA: {query}
+
+RESPUESTA (solo basada en el contexto anterior):"""
+
+    try:
+        with st.spinner("🤖 Consultando Mistral local..."):
             response = requests.post(
                 LLAMA_SERVER_URL,
-                json=payload,
-                timeout=timeout
+                json={
+                    "prompt": prompt,
+                    "n_predict": 150,
+                    "temperature": 0.3,
+                    "top_p": 0.8,
+                    "top_k": 20,
+                    "repeat_penalty": 1.05,
+                    "stop": ["</s>", "PREGUNTA:", "CONTEXTO:", "REGLAS:"]
+                },
+                timeout=60
             )
-            
-            if response.status_code == 200:
-                data = response.json()
-                text = data.get("content", "").strip()
-                
-                if "Respuesta:" in text:
-                    text = text.split("Respuesta:")[-1].strip()
-                
-                if text and len(text) > 15:
-                    return text
-                elif attempt < len(timeouts):
-                    payload["n_predict"] = min(payload["n_predict"] + 50, 200)
-                    time.sleep(1)
-                    continue
-                else:
-                    return "Esta información no se encuentra claramente especificada en los documentos disponibles."
-            
-            else:
-                if attempt < len(timeouts):
-                    time.sleep(2)
-                    continue
-                else:
-                    return f"Error del servidor: {response.status_code}"
-                    
-        except requests.exceptions.Timeout:
-            if attempt < len(timeouts):
-                st.warning(f"⏱️ Timeout de {timeout}s, reintentando...")
-                time.sleep(1)
-                continue
-            else:
-                return "⏱️ El servidor local está tardando demasiado en responder."
         
-        except requests.exceptions.ConnectionError:
-            return "❌ No se puede conectar al servidor llama.cpp local. Verifica que esté corriendo."
-        
-        except Exception as e:
-            if attempt < len(timeouts):
-                time.sleep(2)
-                continue
-            else:
-                return f"❌ Error: {str(e)}"
-    
-    return "❌ No se pudo obtener respuesta después de múltiples intentos."
+        if response.status_code == 200:
+            data = response.json()
+            text = data.get("content", "").strip()
+            
+            # Limpiar la respuesta
+            if "RESPUESTA:" in text:
+                text = text.split("RESPUESTA:")[-1].strip()
+            
+            # Validar que no esté vacía
+            if not text:
+                return "No pude generar una respuesta clara basada en los documentos disponibles."
+                
+            return text
+            
+        else:
+            return f"❌ Error del servidor llama.cpp: {response.status_code}"
+            
+    except requests.exceptions.Timeout:
+        return "⏱️ Timeout: El servidor llama.cpp está tardando demasiado."
+    except requests.exceptions.ConnectionError:
+        return "❌ No se puede conectar al servidor llama.cpp local. Verifica que esté corriendo en http://127.0.0.1:8000"
+    except Exception as e:
+        return f"❌ Error de conexión local: {str(e)}"
 
-# --- RESTO DE FUNCIONES (iguales) ---
+def validate_response_relevance(response, query_keywords, context_keywords):
+    """Valida si la respuesta está relacionada con el contexto"""
+    response_words = extract_keywords(response.lower())
+    
+    # Verificar que la respuesta contenga palabras del contexto
+    context_overlap = len(set(response_words) & set(context_keywords))
+    
+    # Si no hay overlap significativo, es probable que sea una respuesta inventada
+    if context_overlap < 2 and len(response_words) > 5:
+        return False
+    return True
+
+# --- FUNCIONES PDF y búsqueda ---
+def extract_text_from_pdf(file_path):
+    try:
+        with open(file_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+        return text
+    except Exception:
+        return ""
+
+def simple_chunking(text, source, chunk_size=400):
+    chunks = []
+    text = re.sub(r'\s+', ' ', text).strip()
+    if len(text) < 50:
+        return chunks
+    overlap = 50
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        if end < len(text):
+            space_pos = text.rfind(' ', end - 50, end)
+            if space_pos > start:
+                end = space_pos
+        chunk_text = text[start:end].strip()
+        if len(chunk_text) > 50:
+            chunks.append({
+                'content': chunk_text,
+                'source': source
+            })
+        start = end - overlap
+        if start >= len(text) - 50:
+            break
+    return chunks
+
 @st.cache_data
 def load_documents():
     all_chunks = []
-    
     if not os.path.exists(DOCUMENTS_PATH):
         os.makedirs(DOCUMENTS_PATH)
         return all_chunks
     
     pdf_files = glob.glob(os.path.join(DOCUMENTS_PATH, "*.pdf"))
-    
-    for pdf_file in pdf_files:
-        try:
-            with open(pdf_file, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                full_text = ""
-                
-                for page in pdf_reader.pages:
-                    full_text += page.extract_text() + "\n"
-                
-                full_text = re.sub(r'\s+', ' ', full_text).strip()
-                
-                if len(full_text) > 50:
-                    chunks = create_chunks(full_text, chunk_size=400, overlap=60)
-                    
-                    for chunk in chunks:
-                        all_chunks.append({
-                            'content': chunk,
-                            'source': os.path.basename(pdf_file)
-                        })
-        except Exception as e:
-            st.error(f"Error procesando {pdf_file}: {e}")
-    
+    for file_path in pdf_files:
+        filename = os.path.basename(file_path)
+        text = extract_text_from_pdf(file_path)
+        if text.strip():
+            chunks = simple_chunking(text, filename)
+            all_chunks.extend(chunks)
     return all_chunks
 
-def create_chunks(text, chunk_size=400, overlap=60):
-    chunks = []
-    start = 0
-    
-    while start < len(text):
-        end = start + chunk_size
-        chunk = text[start:end]
-        
-        if chunk.strip():
-            chunks.append(chunk.strip())
-        
-        start = end - overlap
-        
-        if end >= len(text):
-            break
-    
-    return chunks
+def extract_keywords(text):
+    text = re.sub(r'[^\w\s]', ' ', text.lower())
+    words = text.split()
+    words = [w for w in words if len(w) > 2]
+    stop_words = {
+        'que', 'para', 'con', 'por', 'una', 'del', 'las', 'los', 'este', 'esta',
+        'como', 'ser', 'son', 'está', 'están', 'fue', 'sido', 'tiene', 'tienen',
+        'puede', 'pueden', 'debe', 'deben', 'hacer', 'hace', 'muy', 'más', 'menos',
+        'todo', 'todos', 'toda', 'todas', 'cada', 'algunos', 'algunas', 'otro', 'otra'
+    }
+    words = [w for w in words if w not in stop_words]
+    return words
 
-def hybrid_search(query, chunks, top_k=3, min_score=0.15):
-    if not chunks:
+def hybrid_search(query, all_chunks, top_k=3, min_score=0.15):
+    if not all_chunks:
         return []
     
-    vectorizer = TfidfVectorizer(stop_words='english', ngram_range=(1, 2))
-    contents = [chunk['content'] for chunk in chunks]
-    
-    try:
-        tfidf_matrix = vectorizer.fit_transform(contents)
-        query_vector = vectorizer.transform([query])
-        tfidf_scores = cosine_similarity(query_vector, tfidf_matrix).flatten()
-    except:
-        tfidf_scores = np.zeros(len(chunks))
-    
-    query_words = set(query.lower().split())
-    keyword_scores = []
-    
-    for chunk in chunks:
-        content_words = set(chunk['content'].lower().split())
-        overlap = len(query_words.intersection(content_words))
-        score = overlap / len(query_words) if query_words else 0
-        keyword_scores.append(score)
-    
-    keyword_scores = np.array(keyword_scores)
-    combined_scores = 0.7 * tfidf_scores + 0.3 * keyword_scores
-    
-    top_indices = combined_scores.argsort()[-top_k:][::-1]
-    
+    query_keywords = extract_keywords(query)
     results = []
-    for idx in top_indices:
-        if combined_scores[idx] >= min_score:
-            chunk_copy = chunks[idx].copy()
-            chunk_copy['score'] = combined_scores[idx]
-            results.append(chunk_copy)
     
-    return results
+    for chunk in all_chunks:
+        chunk_text = chunk['content'].lower()
+        chunk_keywords = extract_keywords(chunk_text)
+        
+        exact_matches = len(set(query_keywords) & set(chunk_keywords))
+        exact_score = exact_matches / max(len(query_keywords), 1)
+        
+        partial_score = 0
+        for qword in query_keywords:
+            for cword in chunk_keywords:
+                if qword in cword or cword in qword:
+                    partial_score += 0.5
+        partial_score = partial_score / max(len(query_keywords), 1)
+        
+        phrase_score = 0
+        query_lower = query.lower()
+        if len(query_lower) > 10:
+            query_words = query_lower.split()
+            for i in range(len(query_words) - 2):
+                phrase = ' '.join(query_words[i:i+3])
+                if phrase in chunk_text:
+                    phrase_score += 1
+        
+        final_score = (
+            exact_score * 0.5 +
+            partial_score * 0.2 + 
+            phrase_score * 0.3
+        )
+        
+        if final_score >= min_score:
+            results.append({
+                'content': chunk['content'],
+                'source': chunk['source'],
+                'score': final_score,
+                'exact_matches': exact_matches,
+                'keywords': chunk_keywords,
+                'debug': f"Exact:{exact_score:.2f} Partial:{partial_score:.2f} Phrase:{phrase_score:.2f}"
+            })
+    
+    results.sort(key=lambda x: x['score'], reverse=True)
+    return results[:top_k]
 
 # --- INTERFAZ ---
-st.set_page_config(page_title="Chatbot - Hojas de Seguridad", layout="wide", page_icon="🧑‍🔬")
-
-# CSS
-st.markdown("""
-<style>
-    .main { padding-top: 1rem; }
-    .response-box {
-        background: #e3f9ed;
-        border-radius: 12px;
-        padding: 1.2em;
-        margin-bottom: 1em;
-        border-left: 4px solid #009639;
-    }
-    .cloud-badge {
-        background: #007bff;
-        color: white;
-        padding: 0.3em 0.8em;
-        border-radius: 15px;
-        font-size: 0.8em;
-        font-weight: bold;
-    }
-    .local-badge {
-        background: #28a745;
-        color: white;
-        padding: 0.3em 0.8em;
-        border-radius: 15px;
-        font-size: 0.8em;
-        font-weight: bold;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Detectar entorno
+# Detectar entorno para mostrar badge
 is_cloud = is_streamlit_cloud()
-env_badge = "☁️ CLOUD" if is_cloud else "🏠 LOCAL"
-badge_class = "cloud-badge" if is_cloud else "local-badge"
+env_badge = "☁️ CLOUD (Mistral API)" if is_cloud else "🏠 LOCAL (llama.cpp)"
+badge_class = "env-badge" if is_cloud else "local-badge"
 
 st.markdown(
     f"""
     <div style='text-align:center;'>
         <h1 style='color:#009639; font-size: 2.8rem; margin-bottom:0.2em;'>🧑‍🔬 Chatbot - Hojas de Seguridad</h1>
         <span class='{badge_class}'>{env_badge}</span>
-        <p style='color:#666; font-size:1.1rem; margin-top:1em;'>
-            {'Búsqueda inteligente sin IA externa' if is_cloud else 'IA local con llama.cpp'}
-        </p>
     </div>
     <hr style='border:1px solid #009639; margin-top:1em; margin-bottom:1.5em;'/>
     """,
     unsafe_allow_html=True
 )
 
-# Cargar documentos
 all_chunks = load_documents()
 
-if not all_chunks:
-    st.warning("📁 No se encontraron documentos PDF en la carpeta 'documents'")
-    if is_cloud:
-        st.info("💡 **Para Streamlit Cloud:** Sube los PDFs a la carpeta 'documents' en tu repositorio de GitHub")
-else:
-    st.success(f"✅ {len(all_chunks)} fragmentos cargados")
 
-# Chat
 if all_chunks:
+    st.success(f"✅ {len(all_chunks)} fragmentos de documentos cargados")
+    
     query = st.text_input(
-        "💬 Escribe tu pregunta:",
+        "💬 Escribe tu pregunta sobre seguridad, aplicación, dosis, etc.",
         placeholder="Ejemplo: ¿Qué hacer en caso de contacto con los ojos?",
-        key="query_input"
+        key="input_pregunta"
     )
     
     if query:
-        with st.spinner("🔍 Analizando documentos..."):
-            results = hybrid_search(query, all_chunks, top_k=3, min_score=0.15)
+        results = hybrid_search(query, all_chunks, top_k=3, min_score=0.15)
         
         if results:
             ai_response = generate_ai_response(query, results)
             
-            st.markdown(
-                f'<div class="response-box">'
-                f'<h4 style="color:#009639; margin-top:0;">{"🔍 Análisis Inteligente" if is_cloud else "🤖 Respuesta IA"}:</h4>'
-                f'<div>{ai_response}</div>'
-                f'</div>',
-                unsafe_allow_html=True
-            )
+            # Validación adicional
+            query_keywords = extract_keywords(query)
+            context_keywords = []
+            for result in results:
+                context_keywords.extend(result.get('keywords', []))
+            
+            # Verificar si la respuesta parece inventada
+            if "no se encuentra" not in ai_response.lower() and not validate_response_relevance(ai_response, query_keywords, context_keywords):
+                ai_response = "Esta información no se encuentra claramente especificada en los documentos disponibles."
+            
+            if ai_response:
+                # Mostrar fuentes
+                sources = list(set([r['source'] for r in results]))
+                
+                st.markdown(
+                    "<div style='background:#e3f9ed; padding:1em; border-radius:8px; border-left:4px solid #009639;'>",
+                    unsafe_allow_html=True
+                )
+                st.markdown(f"**🤖 Respuesta:**")
+                st.markdown(ai_response)
+                st.markdown("</div>", unsafe_allow_html=True)
+                
+                # Mostrar fuentes
+                st.markdown("---")
+                st.markdown("**📄 Fuentes consultadas:**")
+                for source in sources:
+                    st.markdown(f"• {source}")
+                
+                # Mostrar fragmentos relevantes (opcional)
+                with st.expander("🔍 Ver fragmentos relevantes"):
+                    for i, result in enumerate(results[:2], 1):
+                        st.markdown(f"**Fragmento {i}** (Score: {result['score']:.2f}) - *{result['source']}*")
+                        st.markdown(f"```\n{result['content'][:300]}...\n```")
+                        
         else:
-            st.warning("❌ No encontré información relevante para tu pregunta.")
+            st.warning("❌ No se encontraron fragmentos relevantes para tu consulta.")
+            st.info("💡 **Sugerencias:**\n- Usa términos más específicos\n- Verifica la ortografía\n- Intenta con sinónimos")
+    
+else:
+    st.warning("⚠️ No hay documentos cargados")
+    st.info("""
+    **Para usar el chatbot:**
+    1. Crea una carpeta llamada `documents` en el mismo directorio del script
+    2. Coloca tus archivos PDF de hojas de seguridad en esa carpeta
+    3. Reinicia la aplicación
+    """)
 
-# Sidebar
+# --- SIDEBAR INFO ---
 with st.sidebar:
-    st.markdown("### 🔧 Estado del Sistema")
-    st.write(f"🌍 **Entorno:** {'Streamlit Cloud' if is_cloud else 'Local'}")
-    st.write(f"🤖 **IA:** {'Búsqueda inteligente' if is_cloud else 'llama.cpp'}")
-    st.write(f"📄 **Documentos:** {len(all_chunks)} fragmentos")
+    st.markdown("### ℹ️ Información")
+    st.markdown(f"**Entorno:** {env_badge}")
+    st.markdown(f"**Documentos:** {len(all_chunks)} fragmentos")
+    
+    if all_chunks:
+        # Mostrar lista de documentos
+        pdf_files = glob.glob(os.path.join(DOCUMENTS_PATH, "*.pdf"))
+        st.markdown("**📁 Archivos cargados:**")
+        for pdf_file in pdf_files:
+            filename = os.path.basename(pdf_file)
+            st.markdown(f"• {filename}")
+    
+    st.markdown("---")
+    st.markdown("### 🔧 Configuración")
     
     if is_cloud:
-        st.markdown("### ☁️ Modo Cloud")
-        st.info("""
-        **Funcionalidades:**
-        ✅ Búsqueda avanzada por patrones
-        ✅ Análisis de palabras clave
-        ✅ Extracción de información relevante
-        ✅ Sin dependencias externas
-        """)
+        st.info("**Modo Cloud:** Usando Mistral API")
+        st.markdown("Configura `MISTRAL_API_KEY` en Secrets")
     else:
-        st.markdown("### 🏠 Modo Local")
-        st.info("""
-        **Funcionalidades:**
-        ✅ IA generativa con llama.cpp
-        ✅ Respuestas contextuales
-        ✅ Procesamiento avanzado
-        """)
+        st.info("**Modo Local:** Usando llama.cpp")
+        st.markdown("Servidor: http://127.0.0.1:8000")
     
+    st.markdown("---")
+    st.markdown("### 💡 Consejos")
+    st.markdown("""
+    - Haz preguntas específicas
+    - Menciona el producto si es posible
+    - Usa términos técnicos cuando sea necesario
+    - Pregunta sobre: seguridad, aplicación, dosis, primeros auxilios
+    """)
