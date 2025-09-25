@@ -97,7 +97,7 @@ def generate_ai_response(query, relevant_chunks):
         return generate_local_mistral_response(query, context)
 
 def generate_mistral_api_response(query, context):
-    """Mistral via API para Streamlit Cloud"""
+    """Mistral via API para Streamlit Cloud - VERSIÓN MEJORADA"""
     try:
         # Verificar si tenemos la API key de forma segura
         try:
@@ -110,25 +110,31 @@ def generate_mistral_api_response(query, context):
             "Content-Type": "application/json"
         }
         
+        # Prompt mejorado para cloud
+        system_prompt = """Eres un asistente especializado en hojas de seguridad de productos químicos y agrícolas. 
+
+INSTRUCCIONES IMPORTANTES:
+- Responde ÚNICAMENTE basándote en la información del contexto proporcionado
+- Si la información específica no está en el contexto, indica claramente que no se encuentra disponible
+- Sé conciso pero informativo
+- Usa terminología técnica apropiada cuando sea necesario"""
+
+        user_prompt = f"""CONTEXTO DE DOCUMENTOS DE SEGURIDAD:
+{context}
+
+PREGUNTA DEL USUARIO: {query}
+
+Por favor, responde basándote únicamente en el contexto anterior. Si la información no está disponible, indícalo claramente."""
+
         payload = {
             "model": "mistral-small-latest",
             "messages": [
-                {
-                    "role": "system", 
-                    "content": "Eres un asistente especializado en hojas de seguridad. SOLO responde basándote en la información proporcionada. Si la información no está disponible, di claramente que no se encuentra en los documentos."
-                },
-                {
-                    "role": "user", 
-                    "content": f"""CONTEXTO DE DOCUMENTOS:
-{context}
-
-PREGUNTA: {query}
-
-Responde únicamente basándote en el contexto anterior:"""
-                }
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
             ],
-            "max_tokens": 150,
-            "temperature": 0.3
+            "max_tokens": 200,  # Aumentamos un poco los tokens
+            "temperature": 0.2,  # Reducimos temperatura para más precisión
+            "top_p": 0.9
         }
         
         with st.spinner("🤖 Consultando Mistral API..."):
@@ -144,7 +150,7 @@ Responde únicamente basándote en el contexto anterior:"""
             text = data['choices'][0]['message']['content'].strip()
             
             # Validar que no esté vacía
-            if not text:
+            if not text or len(text) < 10:
                 return "No pude generar una respuesta clara basada en los documentos."
             
             return text
@@ -154,7 +160,7 @@ Responde únicamente basándote en el contexto anterior:"""
         elif response.status_code == 429:
             return "⏱️ Límite de consultas alcanzado. Intenta de nuevo en unos minutos."
         else:
-            return f"❌ Error API Mistral: {response.status_code}"
+            return f"❌ Error API Mistral: {response.status_code} - {response.text}"
             
     except requests.exceptions.Timeout:
         return "⏱️ Timeout: Mistral API está tardando demasiado."
@@ -220,16 +226,31 @@ RESPUESTA (solo basada en el contexto anterior):"""
         return f"❌ Error de conexión local: {str(e)}"
 
 def validate_response_relevance(response, query_keywords, context_keywords):
-    """Valida si la respuesta está relacionada con el contexto"""
+    """Valida si la respuesta está relacionada con el contexto - VERSIÓN MEJORADA"""
     response_words = extract_keywords(response.lower())
     
-    # Verificar que la respuesta contenga palabras del contexto
-    context_overlap = len(set(response_words) & set(context_keywords))
+    # Si la respuesta es muy corta, probablemente es válida
+    if len(response_words) <= 10:
+        return True
     
-    # Si no hay overlap significativo, es probable que sea una respuesta inventada
-    if context_overlap < 2 and len(response_words) > 5:
-        return False
-    return True
+    # Verificar que la respuesta contenga palabras del contexto O de la query
+    context_overlap = len(set(response_words) & set(context_keywords))
+    query_overlap = len(set(response_words) & set(query_keywords))
+    
+    # Criterios más flexibles para cloud
+    total_overlap = context_overlap + query_overlap
+    
+    # Si hay al menos 1 palabra en común, consideramos válida la respuesta
+    if total_overlap >= 1:
+        return True
+    
+    # Si la respuesta contiene palabras técnicas comunes, también es válida
+    technical_words = {'seguridad', 'aplicación', 'dosis', 'contacto', 'ojos', 'piel', 'inhalación', 'producto'}
+    response_technical = set(response_words) & technical_words
+    if len(response_technical) >= 1:
+        return True
+    
+    return False
 
 # --- FUNCIONES PDF y búsqueda ---
 def extract_text_from_pdf(file_path):
@@ -364,7 +385,6 @@ st.markdown(
 
 all_chunks = load_documents()
 
-
 if all_chunks:
     st.success(f"✅ {len(all_chunks)} fragmentos de documentos cargados")
     
@@ -380,14 +400,16 @@ if all_chunks:
         if results:
             ai_response = generate_ai_response(query, results)
             
-            # Validación adicional
+            # Validación adicional - MÁS FLEXIBLE PARA CLOUD
             query_keywords = extract_keywords(query)
             context_keywords = []
             for result in results:
                 context_keywords.extend(result.get('keywords', []))
             
-            # Verificar si la respuesta parece inventada
-            if "no se encuentra" not in ai_response.lower() and not validate_response_relevance(ai_response, query_keywords, context_keywords):
+            # Solo aplicar validación estricta si la respuesta es muy larga y sospechosa
+            if (len(ai_response.split()) > 50 and 
+                "no se encuentra" not in ai_response.lower() and 
+                not validate_response_relevance(ai_response, query_keywords, context_keywords)):
                 ai_response = "Esta información no se encuentra claramente especificada en los documentos disponibles."
             
             if ai_response:
@@ -407,6 +429,13 @@ if all_chunks:
                 st.markdown("**📄 Fuentes consultadas:**")
                 for source in sources:
                     st.markdown(f"• {source}")
+                
+                # Debug info para cloud (temporal)
+                if is_cloud:
+                    with st.expander("🔧 Debug Info (Cloud)"):
+                        st.write(f"Query keywords: {query_keywords}")
+                        st.write(f"Context keywords: {context_keywords[:10]}")
+                        st.write(f"Response length: {len(ai_response.split())} words")
                 
                 # Mostrar fragmentos relevantes (opcional)
                 with st.expander("🔍 Ver fragmentos relevantes"):
